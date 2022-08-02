@@ -24,6 +24,7 @@ classdef ksysid
         delays;     % number of delays to include
         liftinput;  % if 1, input is lifted along with state, yielding nonlinear model
         model_type; % 'linear' or 'nonlinear'
+        includeConst; % include constant term
         
         traindata;  % scaled exp/sim data for training the model
         valdata;    % scaled exp/sim data for validating the model
@@ -74,6 +75,7 @@ classdef ksysid
             obj.lasso = [ 1e6 ]; % default is least squares solution
             obj.delays = 1; % default 1 to ensure model is dynamic
             obj.model_type = 'linear';
+            obj.includeConst = true;
             
             % replace default values with user input values
             obj = obj.parse_args( varargin{:} );
@@ -416,8 +418,10 @@ classdef ksysid
             end
             
             % add a constant term to the end of the set
-            fullBasis = [ fullBasis ; sym(1) ];
-            
+            if obj.includeConst == 1
+                fullBasis = [ fullBasis ; sym(1) ];
+            end
+
             % remove current input from zeta
             if obj.liftinput == 1
                 zeta = zeta(1 : obj.params.nzeta);
@@ -792,6 +796,7 @@ classdef ksysid
                 Px = zeros(length(x), Nm);
                 Py = zeros(length(x), Nm);
             end
+
             for i = 1:length(x)
                 if obj.liftinput == 1    % don't append input if it already is lifted nonlinearly
                     psix = obj.lift.full( [ x(i,:) , u(i,:) ]' )';   
@@ -897,8 +902,8 @@ classdef ksysid
             
             % Solve the quadratic program
             [x , results] = quadprog_gurobi( 0.5*H , f , Aq , bq );       % use gurobi to solve
-%             options = optimoptions('quadprog', 'Display', 'iter');
-%             [ x, fval, exitflag ] = quadprog(2*H, f, Aq, bq, [], [], [], [], [],options);      % use matlab to solve
+            % options = optimoptions('quadprog', 'Display', 'iter');
+            % [ x, fval, exitflag ] = quadprog( H, f, Aq, bq, [], [], [], [], [], options );      % use matlab to solve
             
             % Recover Uvec from the optimization variable
             xout = M * x;
@@ -941,6 +946,9 @@ classdef ksysid
             out.B = M*B;  % edited to include projection M, 12/11/2018
             out.C = Cy;
             out.M = M;
+            
+            % (JOHN) Modification 2: Enable specification of different
+            % discretization schemes
             out.sys = ss( out.A , out.B , Cy , 0 , obj.params.Ts );  % discrete state space system object
             out.params = obj.params;    % save system parameters as part of system struct    
             out.K = koopData.K; % save the Koopman operator matrix just in case
@@ -1056,7 +1064,9 @@ classdef ksysid
             %   liftedSys - struct with fields A, B, C, sys, ...
             %   valdata - struct with fields t, y, u (at least)
             %   results - struct with simulation results and error calculations
-            
+            W = obj.project.W;
+            V = obj.project.V;
+
             % shift real data so delays can be accounted for
             index0 = obj.params.nd + 1;  % index of the first state
             treal = valdata.t(index0 : end);    % start simulation late so delays can be taken into account
@@ -1078,12 +1088,12 @@ classdef ksysid
             tsim = treal;
             usim = ureal;
             ysim = zeros( size( yreal ) ); % preallocate
-            zsim = zeros( size( zreal ) ); % preallocate
+            zsim = zeros( size( V' * zreal ) ); % preallocate (TODO: project to modes)
             ysim(1,:) = yreal(1,:); % initialize
-            zsim(1,:) = z0';        % initialize
+            zsim(1,:) = V' * z0';        % initialize (TODO: project to modes)
             for j = 1 : length(treal)-1
-                zsim(j+1,:) = ( model.A * zsim(j,:)' + model.B * usim(j,:)' )';
-                ysim(j+1,:) = ( model.C * zsim(j+1,:)' )';
+                zsim(j+1,:) = ( W * model.A * V * zsim(j,:)' + W * model.B * usim(j,:)' )';
+                ysim(j+1,:) = ( model.C * V * zsim(j+1,:)' )';
             end
             
             % save simulations in output struct
