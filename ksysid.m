@@ -28,6 +28,7 @@ classdef ksysid
         traindata;  % scaled exp/sim data for training the model
         valdata;    % scaled exp/sim data for validating the model
         snapshotPairs;  % snapshot pairs extracted from training data
+        includeConst; % Include constant term in basis
     end
     
     methods
@@ -74,6 +75,7 @@ classdef ksysid
             obj.lasso = [ 1e6 ]; % default is least squares solution
             obj.delays = 1; % default 1 to ensure model is dynamic
             obj.model_type = 'linear';
+            obj.includeConst = true;
             
             % replace default values with user input values
             obj = obj.parse_args( varargin{:} );
@@ -415,8 +417,10 @@ classdef ksysid
                 end
             end
             
-            % add a constant term to the end of the set
-            fullBasis = [ fullBasis ; sym(1) ];
+            % add a constant term to the end of the set only if designated
+            if obj.includeConst
+                fullBasis = [ fullBasis ; sym(1) ];
+            end
             
             % remove current input from zeta
             if obj.liftinput == 1
@@ -896,9 +900,10 @@ classdef ksysid
             end
             
             % Solve the quadratic program
-%             [x , results] = quadprog_gurobi( 0.5*H , f , Aq , bq );       % use gurobi to solve
-            options = optimoptions('quadprog', 'Display', 'iter');
-            [ x, fval, exitflag ] = quadprog( H, f, Aq, bq, [], [], [], [], [], options );      % use matlab to solve
+            [x , results] = quadprog_gurobi( 0.5*H , f , Aq , bq );       % use gurobi to solve
+            
+            % options = optimoptions('quadprog', 'Display', 'iter');
+            % [ x, fval, exitflag ] = quadprog( H, f, Aq, bq, [], [], [], [], [], options );      % use matlab to solve
             
             % Recover Uvec from the optimization variable
             xout = M * x;
@@ -1071,19 +1076,19 @@ classdef ksysid
             % set initial condition
             valdata_wzeta = get_zeta( obj , valdata );
             zeta0 = valdata_wzeta.zeta(1,:)';    % initial state with delays
-            z0 = obj.lift.full( zeta0 );    % initial lifted state
+            z0 = obj.basis.W * obj.lift.full( zeta0 );    % initial lifted state
             
             % simulate lifted linear model
 %             [ ysim , tsim , zsim ] = lsim(model.sys, ureal , treal , z0); % Don't use lsim. Might be doing weird stuff
             tsim = treal;
             usim = ureal;
             ysim = zeros( size( yreal ) ); % preallocate
-            zsim = zeros( size( zreal ) ); % preallocate
+            zsim = zeros( size( zreal, 1 ),  size( z0, 1 ) ); % preallocate
             ysim(1,:) = yreal(1,:); % initialize
             zsim(1,:) = z0';        % initialize
             for j = 1 : length(treal)-1
-                zsim(j+1,:) = ( model.A * zsim(j,:)' + model.B * usim(j,:)' )';
-                ysim(j+1,:) = ( model.C * zsim(j+1,:)' )';
+                zsim(j+1,:) = ( obj.basis.W * model.A * obj.basis.V * zsim(j,:)' + obj.basis.W * model.B * usim(j,:)' )';
+                ysim(j+1,:) = ( model.C * obj.basis.V * zsim(j+1,:)' )';
             end
             
             % save simulations in output struct
