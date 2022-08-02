@@ -13,7 +13,7 @@
 % 4. Save data to as .mat file with functionality for interface with python
 
 %% parameters to consider for tuning
-Ts = 0.1; % sampling time to consider
+Ts = 0.1; % sampling time to consider 
 obs_degree = 2;  % Degree of monioials to consider
 delay = 1;  % Nbr of delays to consider in observables
 lasso = [10]; % Lasso parameter value
