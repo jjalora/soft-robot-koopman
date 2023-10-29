@@ -11,23 +11,25 @@
 % 2. Load saved diamond_koopman and train this data
 % 3. Validate data
 % 4. Save data to as .mat file with functionality for interface with python
+%% Clear all variables and things
+clear all; clc;
 
 %% parameters to consider for tuning
 Ts = 0.1; % sampling time to consider 
-obs_degree = 2;  % Degree of monioials to consider
+obs_degree = 2;  % Degree of monomials to consider
 delay = 1;  % Nbr of delays to consider in observables
-lasso = [10]; % Lasso parameter value
-includeConst = true;
+lasso = [10]; % Lasso parameter value. [10] for Diamond 
+includeConst = true; % false if doing DMD
 truncate_model = false; fractionModes = 1.0;
 hardware = true;
 
 %% gather training data (need to prepare data file before running this)
 
 % load in data file(s)
-[ datafile_name , datafile_path ] = uigetfile( 'datafiles/koopman_paper_import/*.mat' ,...
+[ datafile_name , datafile_path ] = uigetfile( 'datafiles/*.mat' ,...
     'Choose training data file...' );
 
-[ valfile_name, valfile_path ] = uigetfile('datafiles/koopman_paper_import/*.mat' ,...
+[ valfile_name, valfile_path ] = uigetfile('datafiles/*.mat' ,...
     'Choose validation data file...' );
 
 training_data = load([datafile_path, datafile_name]);
