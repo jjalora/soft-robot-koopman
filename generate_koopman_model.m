@@ -15,13 +15,27 @@
 clear all; clc;
 
 %% parameters to consider for tuning
-Ts = 0.1; % sampling time to consider 
-obs_degree = 2;  % Degree of monomials to consider
+% Ts = 0.1; % sampling time to consider 
+% obs_degree = 2;  % Degree of monomials to consider
+% delay = 1;  % Nbr of delays to consider in observables
+% lasso = [10]; % Lasso parameter value. [10] for Diamond 
+% includeConst = true; % false if doing DMD
+% truncate_model = false; fractionModes = 1.0;
+% hardware = true;
+%% Testing parameters to tune
+Ts = 0.02; % sampling time to consider (0.02 for hardware)
+obs_degree = 1;  % Degree of monomials to consider
 delay = 1;  % Nbr of delays to consider in observables
-lasso = [10]; % Lasso parameter value. [10] for Diamond 
-includeConst = true; % false if doing DMD
+
+lasso = [100]; % Lasso parameter value. [10] for Diamond
+static_lambda = [1];
+
+includeConst = false; % false if doing DMD
+includeInput = false; % true if we want to include input in basis
+
 truncate_model = false; fractionModes = 1.0;
-hardware = true;
+hardware = false;
+static_operator = true; % true if we want to have a feedfoward term
 
 %% gather training data (need to prepare data file before running this)
 
@@ -31,6 +45,7 @@ hardware = true;
 
 [ valfile_name, valfile_path ] = uigetfile('datafiles/*.mat' ,...
     'Choose validation data file...' );
+
 
 training_data = load([datafile_path, datafile_name]);
 % training_data.u = training_data.u(1:end-1,:);
@@ -48,6 +63,56 @@ if hardware
     val_data.y = val_data.y';
 end
 val_data = data.resample(val_data, Ts);
+
+% Build static datasets
+static_data.t = [];
+static_data.u = [];
+static_data.y = [];
+if static_operator
+    [ staticfile_name , staticfile_path ] = uigetfile( 'datafiles/*.mat' ,...
+    'Choose Static Training data file...', 'MultiSelect', 'on');
+    if ~iscell(staticfile_name)
+        staticfile_name = {staticfile_name};
+    end
+
+    for i = 1:length(staticfile_name)
+        loaded_data = load([staticfile_path, staticfile_name{i}]);
+        
+        if hardware
+            loaded_data.t = loaded_data.t';
+            loaded_data.u = loaded_data.u';
+            loaded_data.y = loaded_data.y';
+        end
+
+        % Append time 't' data
+        if isempty(static_data.t)
+            static_data.t = loaded_data.t;
+        else
+            time_offset = static_data.t(end) + (loaded_data.t(2) - loaded_data.t(1)); % Calculate time offset
+            static_data.t = [static_data.t, time_offset + loaded_data.t]; % Append (TODO: Use semicolon for hardware :( )
+        end
+
+        % Append time 'u' data
+        if isempty(static_data.u)
+            static_data.u = loaded_data.u;
+        else
+            static_data.u = [static_data.u; loaded_data.u];
+        end
+
+        % Append time 'y' data
+        if isempty(static_data.y)
+            static_data.y = loaded_data.y;
+        else
+            static_data.y = [static_data.y; loaded_data.y];
+        end
+    end
+    
+    static_data = data.resample(static_data, Ts);
+
+    [static_y, static_u] = data.collectStaticData(static_data.y, static_data.u);
+    static_data.y = static_y;
+    static_data.u = static_u;
+end
 
 data_inst = data();
 
@@ -70,7 +135,10 @@ ksysid_inst = ksysid( data4sysid, ...
                 'snapshots' , Inf ,...          % Number of snapshot pairs
                 'lasso' , lasso ,...           % L1 regularization term
                 'delays' , delay, ...          % Numer of state/input delays
-                'includeConst', includeConst);         % Include constant term (modify this for EDMD)
+                'includeConst', includeConst, ...         % Include constant term (modify this for EDMD)
+                'includeInput', includeInput, ...
+                'static_dataset', static_data, ...
+                'static_lambda', static_lambda); % Include input in basis
 
 
 %% train model(s)
@@ -194,14 +262,16 @@ model.sysid_class.model.A = A_r + 10^-6 * eye(length(A_r));
 model.sysid_class.model.B = B_r;
 model.sysid_class.model.C = C_r;
 model.sysid_class.params.N = length(A_r);
+model.sysid_class.params.DMD = ~includeConst;
+model.sysid_class.params.inputInFeatures = includeInput;
+model.sysid_class.model.G = models.G;
+model.sysid_class.model.Ginv = models.Ginv;
 
 export_to_python(model);
 
 %% save 
 % You do this based on the validation results.
 % Call this function:
-
-
 
 function export_to_python(model)
     % model should be of ksysid type
@@ -214,6 +284,8 @@ function export_to_python(model)
     lin_model.K = model.sysid_class.model.K;
     lin_model.V = model.sysid_class.basis.V;
     lin_model.W = model.sysid_class.basis.W;
+    lin_model.G = model.sysid_class.model.G;
+    lin_model.Ginv = model.sysid_class.model.Ginv;
     py_data.model = lin_model;
     
     params = struct();
@@ -226,6 +298,8 @@ function export_to_python(model)
     params.delays = model.sysid_class.delays;
     params.obs_type = model.sysid_class.obs_type;
     params.obs_degree = model.sysid_class.obs_degree;
+    params.DMD = model.sysid_class.params.DMD;
+    params.inputInFeatures = model.sysid_class.params.inputInFeatures;
     
     py_data.params = params;
     save('py_model.mat', 'py_data', '-v7');

@@ -15,7 +15,35 @@ classdef data
         end
     end
    
-    methods(Static)    
+    methods(Static)
+        function [static_y, static_u] = collectStaticData(y, u)
+            function equal = approxEqual(a, b, tol)
+                % Check if two vectors are approximately equal within a tolerance
+                equal = all(abs(a - b) < tol);
+            end
+            static_y = [];
+            static_u = [];
+            previous_u = u(1, :);  % Initialize with the first element of u
+            tolerance = 1e-6;  % Tolerance for approximate equality
+        
+            % Loop through each element starting from the second element
+            for i = 2:size(u, 1)
+                current_u = u(i, :);
+        
+                % Check if u changed within a specified tolerance
+                if ~approxEqual(current_u, previous_u, tolerance)
+                    % Check the last element in static_u
+                    if isempty(static_u) || ~approxEqual(static_u(end, :), previous_u, tolerance)
+                        % Save the prior y and u values
+                        static_y = [static_y; y(i-1, :)];
+                        static_u = [static_u; previous_u];
+                    end
+                end
+        
+                previous_u = current_u;  % Update previous_u for the next iteration
+            end
+        end
+
         % resample (resamples data with a desired time step)
         function data_resampled = resample( data , Ts )
             %resample: resamples sim/exp data with a desired timestep

@@ -11,6 +11,8 @@ classdef ksysid
         
         candidates; % candidate models trained with different lasso params
         koopData;   % info related to the training of koopman operator
+        G;          % Static Koopman Operator
+        Ginv;       % Inverse of Static Koopman Operator
         
         scaledown;      % contains scaling functions for y,u,zeta to lie in [-1,1]
         scaleup;        % contains scaling from [-1,1] to real life range
@@ -29,6 +31,9 @@ classdef ksysid
         valdata;    % scaled exp/sim data for validating the model
         snapshotPairs;  % snapshot pairs extracted from training data
         includeConst; % Include constant term in basis
+        includeInput; % Include input term in the basis
+        static_dataset; % Include static dataset for inverse control mappings
+        static_lambda; % L2 Regularization 
     end
     
     methods
@@ -73,9 +78,11 @@ classdef ksysid
             obj.obs_degree = [ 1 ];
             obj.snapshots = Inf;
             obj.lasso = [ 1e6 ]; % default is least squares solution
+            obj.static_lambda = 0.0;
             obj.delays = 1; % default 1 to ensure model is dynamic
             obj.model_type = 'linear';
             obj.includeConst = true;
+            obj.includeInput = true;
             
             % replace default values with user input values
             obj = obj.parse_args( varargin{:} );
@@ -107,6 +114,9 @@ classdef ksysid
 %             % To suppress scaling, comment this in and comment out above
 %             obj.traindata = data4train_merged;
 %             obj.valdata = data4val;
+            if ~isempty(obj.static_dataset.t)
+                obj.static_dataset = obj.scale_data(obj.static_dataset);
+            end
             
             % get shapshot pairs from traindata
             obj.snapshotPairs = obj.get_snapshotPairs( obj.traindata , obj.snapshots );
@@ -386,12 +396,17 @@ classdef ksysid
             x = sym('x', [obj.params.n, 1] , 'real');   % state variable x
             xd = sym('xd', [obj.params.nd * obj.params.n, 1] , 'real');   % state delays i.e. for 2 delays: [x_i-1, x_i-2]'
             ud = sym('ud', [obj.params.nd * obj.params.m, 1] , 'real');   % input delays i.e. for 2 delays: [u_i-1, u_i-2]'
-            zeta = [x ; xd; ud];    % state variable with delays
+            zeta = [x ; xd];    % state variable with delays
             u = sym('u', [obj.params.m, 1] , 'real');   % input vector u
-            if obj.liftinput == 1    % if the includes input in unlifted state
-                zeta = [ zeta ; u ];    % just so lifting function works
-%                 obj.params.nzeta = obj.params.nzeta + obj.params.m;
+            
+            % if you want to include input in the basis
+            if obj.includeInput
+                zeta = [ zeta ; ud ];
+                if obj.liftinput == 1    % if the includes input in unlifted state
+                    zeta = [ zeta ; u ];
+                end
             end
+
             obj.params.zeta = zeta; % needed for defining lifting function
             obj.params.x = x;
             obj.params.u = u;
@@ -423,7 +438,7 @@ classdef ksysid
             end
             
             % remove current input from zeta
-            if obj.liftinput == 1
+            if obj.liftinput == 1 && obj.includeInput
                 zeta = zeta(1 : obj.params.nzeta);
             end
             
@@ -697,7 +712,11 @@ classdef ksysid
                     ydel(1 , fillrange_y) = data_in.y( i - j , : );
                     udel(1 , fillrange_u) = data_in.u( i - j , : );
                 end
-                zetak = [ y , ydel , udel ];
+                if obj.includeInput
+                    zetak = [ y , ydel , udel ];
+                else
+                    zetak = [ y , ydel ];
+                end
 %                 if obj.liftinput == 1     % include input in zeta
 %                     zetak = [ zetak , u ];
 %                 end
@@ -789,19 +808,32 @@ classdef ksysid
             Nm = obj.params.N + m;   % dimension of z plus input
             N = obj.params.N;       % dimension of z (i.e. lifted state)
             
-            if obj.liftinput == 1    % don't append input
-                Px = zeros(length(x), obj.params.N);
-                Py = zeros(length(x), obj.params.N);
-            else    % append input to end of lifted state
+            if obj.includeInput
+                if obj.liftinput == 1    % don't append input
+                    Px = zeros(length(x), obj.params.N);
+                    Py = zeros(length(x), obj.params.N);
+                else    % append input to end of lifted state
+                    Px = zeros(length(x), Nm);
+                    Py = zeros(length(x), Nm);
+                end
+            else
                 Px = zeros(length(x), Nm);
                 Py = zeros(length(x), Nm);
             end
+
             for i = 1:length(x)
-                if obj.liftinput == 1    % don't append input if it already is lifted nonlinearly
-                    psix = obj.lift.full( [ x(i,:) , u(i,:) ]' )';   
-                    psiy = obj.lift.full( [ y(i,:) , u(i,:) ]' )';
-                    Px(i,:) = psix;
-                    Py(i,:) = psiy;
+                if obj.includeInput
+                    if obj.liftinput == 1    % don't append input if it already is lifted nonlinearly
+                        psix = obj.lift.full( [ x(i,:) , u(i,:) ]' )';   
+                        psiy = obj.lift.full( [ y(i,:) , u(i,:) ]' )';
+                        Px(i,:) = psix;
+                        Py(i,:) = psiy;
+                    else
+                        psix = obj.lift.full( x(i,:)' )';   
+                        psiy = obj.lift.full( y(i,:)' )';
+                        Px(i,:) = [ psix , u(i,:) ];
+                        Py(i,:) = [ psiy , zeros(1,m) ];     % exclude u from Py (could also use same u as Px)
+                    end
                 else
                     psix = obj.lift.full( x(i,:)' )';   
                     psiy = obj.lift.full( y(i,:)' )';
@@ -876,19 +908,26 @@ classdef ksysid
                 % enforce delay constraint (see notebook from 2019-8-22)
                 if nd >= 1
                     Ad_pos = speye( Nm^2 );
-                    Ad_pos = Ad_pos( n*Nm+1 : Nm*( n*(nd+1) + mnd ) , : );  % remove unused rows
-                    bd_pos = zeros( Nm * ( nnd + mnd ) , 1 );
+                    if obj.includeInput
+                        Ad_pos = Ad_pos( n*Nm+1 : Nm*( n*(nd+1) + mnd ) , : );  % remove unused rows
+                        bd_pos = zeros( Nm * ( nnd + mnd ) , 1 );
+                    else
+                        Ad_pos = Ad_pos( n*Nm+1 : Nm*( n*(nd+1) ) , : );  % remove unused rows
+                        bd_pos = zeros( Nm * ( nnd ) , 1 );
+                    end
                     for i = 1 : nnd     % state delays
                         index = (Nm+1) * (i-1) + 1;
                         bd_pos(index,1) = 1;
                     end
-                    for i = 1 : m   % first input delay
-                        index = Nm * nnd + N + (Nm+1) * (i-1) + 1;
-                        bd_pos(index,1) = 1;
-                    end
-                    for i = 1 : m*(nd-1)    % subsequent input delays (nd > 1)
-                        index = Nm * (nnd+m) + nnd + (Nm+1) * (i-1) + 1;
-                        bd_pos(index,1) = 1;
+                    if obj.includeInput
+                        for i = 1 : m   % first input delay
+                            index = Nm * nnd + N + (Nm+1) * (i-1) + 1;
+                            bd_pos(index,1) = 1;
+                        end
+                        for i = 1 : m*(nd-1)    % subsequent input delays (nd > 1)
+                            index = Nm * (nnd+m) + nnd + (Nm+1) * (i-1) + 1;
+                            bd_pos(index,1) = 1;
+                        end
                     end
                     Ad = [ Ad_pos ; -Ad_pos ] * M;
                     bd = [ bd_pos ; -bd_pos ];
@@ -1009,6 +1048,37 @@ classdef ksysid
             
             W = dpsi_dx \ Ldiag;
         end
+
+        function G_opt = solve_static_Koopman(obj, U, X)
+            % Function to solve the QP problem for minimizing ||U - GX||^2
+        
+            % Number of rows and columns
+            [m, ~] = size(U); 
+            [n, ~] = size(X);
+            % Helper function to vectorize a matrix
+            vec = @(M) M(:);
+            
+            % Formulate the QP problem
+            
+            % Hessian
+            H = kron(X * X', eye(m)) + obj.static_lambda * eye(m * n); 
+            
+            % Linear term
+            f = -2 * vec(U * X');  
+            
+            % No equality or inequality constraints
+            A = [];
+            b = [];
+            Aeq = [];
+            beq = [];
+            
+            % Solve the QP problem
+            options = optimoptions('quadprog', 'Display', 'off');
+            G_vec = quadprog(H, f, A, b, Aeq, beq, [], [], [], options);
+            
+            % Reshape the solution back into matrix form
+            G_opt = reshape(G_vec, m, n);
+        end
         
         % train_models (train multiple koopman models with diff. lasso params)
         function obj = train_models( obj , lasso )
@@ -1049,6 +1119,10 @@ classdef ksysid
                     %   overwritten by user choice later
                     obj.model = obj.candidates{1};
                 end
+            end
+            if ~isempty(obj.static_dataset.t)
+                obj.G = obj.solve_static_Koopman(obj.static_dataset.u', obj.static_dataset.y');
+                obj.Ginv = obj.solve_static_Koopman(obj.static_dataset.y', obj.static_dataset.u');
             end
         end
         
@@ -1207,6 +1281,33 @@ classdef ksysid
                 end
                 err{i} = obj.get_error( results{i}.sim , results{i}.real );
                 obj.plot_comparison( results{i}.sim , results{i}.real , ['Lasso: ' , num2str(mod.lasso)] );
+            end
+
+            if ~isempty(obj.static_dataset.t)
+                figure;
+                % Initialize empty vectors to store handles
+                h1_vec = [];
+                h2_vec = [];
+                
+                for i = 1 : obj.params.m
+                    subplot(obj.params.m, 1, i);
+                    ylabel(['u', num2str(i)]);
+                    ylim([-1, 1]);
+                    hold on;
+                
+                    % Save the plot handles
+                    u_pred = obj.G * obj.static_dataset.y';
+                    h1 = plot(1:size(obj.static_dataset.y, 1), u_pred(i, :), 'b');
+                    h2 = plot(1:size(obj.static_dataset.y, 1), obj.static_dataset.u(:, i), 'r');
+                
+                    h1_vec = [h1_vec; h1];
+                    h2_vec = [h2_vec; h2];
+                
+                    hold off;
+                end
+                
+                % Use any one set of handles for the legend
+                legend([h1_vec(1), h2_vec(1)], {'Static Operator', 'Real'});
             end
             
             % save (or don't save) sysid class, model, and training data
